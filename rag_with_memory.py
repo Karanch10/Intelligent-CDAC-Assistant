@@ -44,7 +44,7 @@ vectorstore = Chroma(
 )
 
 retriever = vectorstore.as_retriever(
-    search_kwargs={"k": 3}
+    search_kwargs={"k": 6}
 )
 
 llm = ChatMistralAI(

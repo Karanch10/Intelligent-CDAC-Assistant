@@ -31,13 +31,13 @@ vectorstore = Chroma(
 )
 
 retriever = vectorstore.as_retriever(
-    search_kwargs={"k": 3}
+    search_kwargs={"k": 6}
 )
 
 llm = ChatMistralAI(
     model="mistral-small-2506",
     api_key=api_key,
-    temperature=0.3,
+    temperature=0.2,
     streaming=True
 )
 
