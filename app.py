@@ -225,8 +225,16 @@ st.markdown(CSS, unsafe_allow_html=True)
 def load_chain():
     load_dotenv()
     api_key = os.getenv("MISTRAL_API_KEY") or st.secrets["MISTRAL_API_KEY"]
+    langsmith_key = os.getenv("LANGSMITH_API_KEY") or st.secrets.get("LANGSMITH_API_KEY")
+
     if not api_key:
         raise ValueError("MISTRAL_API_KEY not found.")
+    if not langsmith_key:
+        raise ValueError("LANGSMITH_API_KEY not found.")
+
+    os.environ["LANGSMITH_API_KEY"] = langsmith_key
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGSMITH_PROJECT"] = "cdac-rag-assistant"
 
     embedding_model = MistralAIEmbeddings(model="mistral-embed", api_key=api_key)
 
