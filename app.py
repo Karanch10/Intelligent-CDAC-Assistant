@@ -264,7 +264,7 @@ def load_chain():
     # lineup changes again, check https://console.groq.com/docs/models
     # for what your key currently has access to.
     llm = ChatGroq(
-        model="openai/gpt-oss-120b",
+        model="groq/compound-mini",
         api_key=groq_api_key,
         temperature=0.2,
         streaming=True,
