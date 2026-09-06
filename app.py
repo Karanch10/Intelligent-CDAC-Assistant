@@ -1,12 +1,15 @@
 import os
 import time
 import uuid
+import random
 
 import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_chroma import Chroma
-from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
+from langchain_mistralai import MistralAIEmbeddings
+from langchain_groq import ChatGroq
+import groq
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
@@ -225,10 +228,13 @@ st.markdown(CSS, unsafe_allow_html=True)
 def load_chain():
     load_dotenv()
     api_key = os.getenv("MISTRAL_API_KEY") or st.secrets["MISTRAL_API_KEY"]
+    groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
     langsmith_key = os.getenv("LANGSMITH_API_KEY") or st.secrets.get("LANGSMITH_API_KEY")
 
     if not api_key:
         raise ValueError("MISTRAL_API_KEY not found.")
+    if not groq_api_key:
+        raise ValueError("GROQ_API_KEY not found.")
     if not langsmith_key:
         raise ValueError("LANGSMITH_API_KEY not found.")
 
@@ -245,11 +251,24 @@ def load_chain():
     )
     retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
 
-    llm = ChatMistralAI(
-        model="mistral-small-2506",
-        api_key=api_key,
+    # Chat completions now go through Groq instead of Mistral. Retrieval
+    # still uses MistralAIEmbeddings above, so that call still counts
+    # against your Mistral quota, but the (usually larger) completion
+    # traffic is now on Groq's separate, more generous rate limits.
+    #
+    # Note: Groq's Llama 3.x models (llama-3.3-70b-versatile,
+    # llama-3.1-8b-instant) are currently Enterprise/contact-sales
+    # only and will 404 on a standard developer API key. The
+    # openai/gpt-oss-* models are the ones with self-serve pricing
+    # and rate limits on the developer plan as of writing. If Groq's
+    # lineup changes again, check https://console.groq.com/docs/models
+    # for what your key currently has access to.
+    llm = ChatGroq(
+        model="openai/gpt-oss-120b",
+        api_key=groq_api_key,
         temperature=0.2,
         streaming=True,
+        max_retries=3,  # let the client itself absorb brief 429/5xx blips
     )
 
     prompt = ChatPromptTemplate.from_messages(
@@ -439,13 +458,69 @@ def process(question: str):
             placeholder.markdown(full_response)
         else:
             config = {"configurable": {"session_id": st.session_state.session_id}}
-            for chunk in rag_with_memory.stream({"question": question}, config=config):
-                full_response += chunk
-                placeholder.markdown(full_response + "\u258c")
-            placeholder.markdown(full_response)
+            import httpx
+
+            # Two different providers can raise a 429 here:
+            #   - Mistral (embeddings, during retrieval): raises
+            #     httpx.HTTPStatusError.
+            #   - Groq (chat completion): raises groq.APIStatusError
+            #     (RateLimitError is a subclass of it), which exposes
+            #     the same .response / .status_code shape as httpx's
+            #     error, just wrapped in its own exception type.
+            # Retry both with exponential backoff (honoring
+            # Retry-After when present) instead of letting the first
+            # 429 crash the run.
+            max_retries = 4
+            base_delay = 2  # seconds
+            attempt = 0
+
+            while True:
+                try:
+                    full_response = ""
+                    for chunk in rag_with_memory.stream(
+                        {"question": question},
+                        config=config
+                    ):
+                        full_response += chunk
+                        placeholder.markdown(full_response + "▌")
+                    placeholder.markdown(full_response)
+                    break
+                except (httpx.HTTPStatusError, groq.APIStatusError) as e:
+                    provider = "Groq" if isinstance(e, groq.APIStatusError) else "Mistral"
+                    status_code = e.response.status_code
+                    is_rate_limited = status_code == 429
+
+                    if is_rate_limited and attempt < max_retries:
+                        retry_after = e.response.headers.get("retry-after")
+                        if retry_after is not None:
+                            delay = float(retry_after)
+                        else:
+                            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                        attempt += 1
+                        placeholder.markdown(
+                            f"_{provider} is rate-limiting requests. Retrying in "
+                            f"{delay:.0f}s (attempt {attempt}/{max_retries})..._"
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    # Out of retries, or a non-429 HTTP error: surface it
+                    # without killing the whole Streamlit script run.
+                    if is_rate_limited:
+                        full_response = (
+                            f"I'm getting rate-limited by the {provider} API right "
+                            "now and couldn't get a response after several "
+                            "retries. Please wait a bit and try again, or check "
+                            f"your {provider} account's rate limits/usage tier."
+                        )
+                        placeholder.warning(full_response)
+                    else:
+                        st.error(f"{provider} API error: {status_code}")
+                        st.code(e.response.text)
+                        full_response = f"{provider} API error: {status_code}"
+                    break
 
     st.session_state.messages.append({"role": "assistant", "content": full_response})
-
 
 # Handle a query queued by a quick-action button
 if st.session_state.pending_query:
